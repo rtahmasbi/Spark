@@ -1,7 +1,6 @@
 # Chapter 1. Introduction to Data Analysis with Spark (15)
 
 
-##
 
 - Spark SQL
 - Spark Streaming
