@@ -1,4 +1,9 @@
-# Chapter 1. Introduction to Data Analysis with Spark (15)
+
+Summary of book
+**Learning Spark** by _Holden Karau, Andy Konwinski, Patrick Wendell, and Matei Zaharia_
+
+---
+
 
 
 
@@ -6,6 +11,7 @@
 - Spark Streaming
 - MLlib
 - GraphX
+
 
 
 ### For running `pyspark`
@@ -18,8 +24,6 @@ pyspark
 
 ```
 
-
-
 ### For running python3:
 ```
 export PYSPARK_PYTHON=python3    # Fully-Qualify this if necessary. (python3)
@@ -29,9 +33,14 @@ export PYSPARK_DRIVER_PYTHON=ptpython3  # Fully-Qualify this if necessary. (ptpy
 
 
 
+# Chapter 1. Introduction to Data Analysis with Spark (15)
+
+
+
+
+
 **resilient distributed dataset (RDD)**
 
-[Chapter 3](#anchors-in-markdown)
 
 # Chapter 2. Downloading Spark and Getting Started (31)
 
@@ -51,7 +60,7 @@ brew cask install caskroom/versions/java8
 
 ```
 
-(#anchors-in-markdown)
+
 
 ### example
 ```
@@ -507,6 +516,151 @@ pandaLovers.mapPartitions(writeRecords).saveAsTextFile(outputFile)
 
 # Chapter 6. Advanced Spark Programming (139)
 # Chapter 7. Running on a Cluster (157)
+
+Spark can run on a wide variety
+of cluster managers (Hadoop YARN, Apache Mesos, and Spark’s own built-in Standalone
+cluster manager) in both on-premise and cloud deployments.
+
+
+In distributed mode, Spark uses a master/slave architecture with one central coordinator
+and many distributed workers. The central coordinator is called the **driver**. The driver
+communicates with a potentially large number of distributed workers called **executors**.
+The driver runs in its own Java process and each executor is a separate Java process. A
+driver and its executors are together termed a Spark **application**.
+
+
+A Spark application is launched on a set of machines using an external service called a
+**cluster manager**. As noted, Spark is packaged with a built-in cluster manager called the
+Standalone cluster manager. Spark also works with Hadoop YARN and Apache Mesos,
+two popular open source cluster managers.
+
+## The driver
+The driver is the process where the `main()` method of your program runs. It is the process
+running the user code that creates a SparkContext, creates RDDs, and performs
+transformations and actions.
+
+
+
+## Executors
+Spark executors are worker processes responsible for running the individual tasks in a
+given Spark job. Executors are launched once at the beginning of a Spark application and
+typically run for the entire lifetime of an application, though Spark applications can
+continue if executors fail. Executors have two roles. First, they run the tasks that make up
+the application and return results to the driver. Second, they provide in-memory storage
+for RDDs that are cached by user programs, through a service called the Block Manager
+that lives within each executor. Because RDDs are cached directly inside of executors,
+tasks can run alongside the cached data.
+
+## Cluster Manager
+Cluster Manager allows Spark to run on top of different external
+managers, such as YARN and Mesos, as well as its built-in Standalone cluster manager.
+
+
+Spark’s documentation consistently uses the terms `driver` and `executor` when describing the processes that execute each Spark application. The terms `master` and `worker` are used to describe the centralized and distributed portions of the cluster manager.
+
+## Launching a Program
+
+Spark provides a single script you can use to
+submit your program to it called `spark-submit`.
+```
+bin/spark-submit my_script.py
+bin/spark-submit —master spark://host:7077 —executor-memory 10g my_script.py
+```
+
+`—master` can be:
+```
+spark://host:port
+mesos://host:port # Connect to a Mesos cluster master at the specified port. By default Mesos masters listen on port 5050.
+yarn
+local
+local[N] # Run in local mode with N cores.
+local[*] # Run in local mode and use as many cores as the machine has.
+```
+
+`-files`:  A list of files to be placed in the working directory of your application. This can be used for data files that
+you want to distribute to each node.
+
+`-pyfiles`: A list of files to be added to the PYTHONPATH of your application. This can contain .py, .egg, or .zip files.
+
+
+
+### Submitting a Python application in YARN client mode
+```
+$ export HADOP_CONF_DIR=/opt/hadoop/conf
+$ ./bin/spark-submit \
+—master yarn \
+—py-files somelib-1.2.egg,otherlib-4.4.zip,other-file.py \
+—deploy-mode client \
+—name “Example Program” \
+—queue exampleQueue \
+—num-executors 40 \
+—executor-memory 10g \
+my_script.py “options” “to your application” “go here”
+```
+
+
+
+## Amazon EC2
+Spark comes with a built-in script to launch clusters on Amazon EC2. This script launches
+a set of nodes and then installs the Standalone cluster manager on them, so once the
+cluster is up, you can use it according to the Standalone mode instructions in the previous
+section. In addition, the EC2 script sets up supporting services such as HDFS, Tachyon,
+and Ganglia to monitor your cluster.
+
+
+To launch a cluster, you should first create an Amazon Web Services (AWS) account and obtain an access key ID and secret access key. Then export these as environment
+variables:
+```
+export AWS_ACCESS_KEY_ID=“…”
+export AWS_SECRET_ACCESS_KEY=“…”
+```
+
+In addition, create an EC2 SSH key pair and download its private key file (usually called
+`keypair.pem`) so that you can SSH into the machines.
+
+Next, run the launch command of the `spark-ec2` script, giving it your key pair name, private key file, and a name for the cluster. By default, this will launch a cluster with one master and one slave, using `m1.xlarge` EC2 instances:
+```
+cd /path/to/spark/ec2
+./spark-ec2 -k mykeypair -i mykeypair.pem launch mycluster
+```
+
+You can also configure the instance types, number of slaves, EC2 region, and other factors
+using options to `spark-ec2`. For example:
+```
+# Launch a cluster with 5 slaves of type m3.xlarge
+./spark-ec2 -k mykeypair -i mykeypair.pem -s 5 -t m3.xlarge launch mycluster
+```
+
+
+
+
+## Logging in to a cluster
+You can log in to a cluster by SSHing into its master node with the .pem file for your keypair. For convenience, spark-ec2 provides a login command for this purpose:
+```
+./spark-ec2 -k mykeypair -i mykeypair.pem login mycluster
+```
+Alternatively, you can find the master’s hostname by running:
+```
+./spark-ec2 get-master mycluster
+```
+Then SSH into it yourself using `ssh -i keypair.pem root@masternode`.
+
+
+To destroy a cluster launched by spark-ec2, run:
+```
+./spark-ec2 destroy mycluster
+```
+
+To stop a cluster, use:
+```
+./spark-ec2 stop mycluster
+```
+Then, later, to start it up again:
+```
+./spark-ec2 -k mykeypair -i mykeypair.pem start mycluster
+```
+
+
 # Chapter 8. Tuning and Debugging Spark (189)
 # Chapter 9. Spark SQL (214)
 
@@ -605,4 +759,5 @@ name AS class.function“)`.
 
 
 # Chapter 10. Spark Streaming (243)
+
 # Chapter 11. Machine Learning with MLlib (283)
