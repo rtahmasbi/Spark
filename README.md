@@ -73,14 +73,6 @@ res1 = rdd.mapValues(lambda x: (x, 1)).reduceByKey(lambda x, y: (x[0] + y[0], x[
 
 ```
 
-
-
-### example
-```
-from pyspark import SparkConf, SparkContext
-conf = SparkConf().setMaster("local").setAppName("My App")
-sc = SparkContext(conf = conf)
-```
 `local` is a special value that runs Spark on one thread on the local machine, without connecting to a cluster.
 
 
@@ -515,6 +507,244 @@ pandaLovers.mapPartitions(writeRecords).saveAsTextFile(outputFile)
 
 
 # Chapter 6. Advanced Spark Programming (139)
+We introduce two types of shared variables:
+**accumulators** to aggregate information and **broadcast** variables to efficiently distribute
+large values.
+
+
+## Accumulators
+When we normally pass functions to Spark, such as a `map()` function or a condition for
+`filter()`, they can use variables defined outside them in the driver program, but each task
+running on the cluster gets a new copy of each variable, and updates from these copies are
+not propagated back to the driver. Spark’s shared variables, **accumulators** and **broadcast**
+variables, relax this restriction for two common types of communication patterns:
+aggregation of results and broadcasts.
+
+
+### Accumulator empty line count in Python
+```
+file = sc.textFile(inputFile)
+# Create Accumulator[Int] initialized to 0
+blankLines = sc.accumulator(0)
+
+def extractCallSigns(line):
+    global blankLines # Make the global variable accessible
+    if (line == ””):
+    blankLines += 1
+    return line.split(” “)
+
+callSigns = file.flatMap(extractCallSigns)
+callSigns.saveAsTextFile(outputDir + “/callsigns”)
+print “Blank lines: %d” % blankLines.value
+```
+
+Note that we will see the right count only after we run the `saveAsTextFile()` action, because the transformation above it, `map()`, is lazy, so the side effect incrementing of the accumulator will happen only when the **lazy** `map()` transformation is forced to occur by the `saveAsTextFile()` action.
+
+Of course, it is possible to aggregate values from an entire RDD back to the driver
+program using actions like reduce(), but sometimes we need a simple way to aggregate
+values that, in the process of transforming an RDD, are generated at different scale or
+granularity than that of the RDD itself.
+
+
+
+### Accumulator error count in Python
+```
+# Create Accumulators for validating call signs
+validSignCount = sc.accumulator(0)
+invalidSignCount = sc.accumulator(0)
+
+def validateSign(sign):
+    global validSignCount, invalidSignCount
+    if re.match(r”\A\d?[a-zA-Z]{1,2}\d{1,4}[a-zA-Z]{1,3}\Z”, sign):
+        validSignCount += 1
+        return True
+    else:
+        invalidSignCount += 1
+        return False
+
+# Count the number of times we contacted each call sign
+validSigns = callSigns.filter(validateSign)
+contactCount = validSigns.map(lambda sign: (sign, 1)).reduceByKey(lambda (x, y): x + y)
+
+# Force evaluation so the counters are populated
+contactCount.count()
+if invalidSignCount.value < 0.1 * validSignCount.value:
+    contactCount.saveAsTextFile(outputDir + “/contactCount”)
+else:
+    print “Too many errors: %d in %d” % (invalidSignCount.value, validSignCount.value
+```
+
+
+
+## Custom Accumulators
+Spark also includes an API to define custom
+accumulator types and custom aggregation operations (e.g., finding the maximum of the
+accumulated values instead of adding them).
+
+Beyond adding to
+a numeric value, we can use any operation for add, provided that operation is commutative
+and associative. For example, instead of adding to track the total we could keep track of
+the maximum value seen so far.
+
+
+## Broadcast Variables
+Spark’s second type of shared variable, broadcast variables, allows the program to
+efficiently send a large, read-only value to all the worker nodes for use in one or more
+Spark operations.
+
+
+### Country lookup in Python
+```
+# Look up the locations of the call signs on the
+# RDD contactCounts. We load a list of call sign
+# prefixes to country code to support this lookup.
+signPrefixes = loadCallSignTable()
+
+def processSignCount(sign_count, signPrefixes):
+    country = lookupCountry(sign_count[0], signPrefixes)
+    count = sign_count[1]
+    return (country, count)
+
+countryContactCounts = (contactCounts
+    .map(processSignCount)
+    .reduceByKey((lambda x, y: x+ y)))
+
+
+```
+This program would run, but if we had a larger table (say, with IP addresses instead of call
+signs), the signPrefixes could easily be several megabytes in size, making it expensive
+to send that Array from the master alongside each task. In addition, if we used the same
+signPrefixes object later (maybe we next ran the same code on file2.txt), it would be sent
+again to each node.
+
+### Country lookup with Broadcast values in Python
+```
+# Look up the locations of the call signs on the
+# RDD contactCounts. We load a list of call sign
+# prefixes to country code to support this lookup.
+signPrefixes = sc.broadcast(loadCallSignTable())
+
+def processSignCount(sign_count, signPrefixes):
+    country = lookupCountry(sign_count[0], signPrefixes.value)
+    count = sign_count[1]
+    return (country, count)
+
+countryContactCounts = (contactCounts
+    .map(processSignCount)
+    .reduceByKey((lambda x, y: x+ y)))
+
+    countryContactCounts.saveAsTextFile(outputDir + “/countries.txt”)
+```
+`countryContactCounts.saveAsTextFile` is just for runnig (lazy computing)
+
+
+
+## Working on a Per-Partition Basis
+Working with data on a per-partition basis allows us to avoid redoing setup work for each
+data item. Operations like opening a database connection or creating a random-number
+generator are examples of setup steps that we wish to avoid doing for each element. Spark
+has per-partition versions of `map` and `foreach` to help reduce the cost of these operations
+by letting you run code only once for each partition of an RDD.
+
+
+### Shared connection pool in Python
+```
+def processCallSigns(signs):
+    “““Lookup call signs using a connection pool”””
+    # Create a connection pool
+    http = urllib3.PoolManager()
+    # the URL associated with each call sign record
+    urls = map(lambda x: “http://73s.com/qsos/%s.json” % x, signs)
+    # create the requests (non-blocking)
+    requests = map(lambda x: (x, http.request(‘GET’, x)), urls)
+    # fetch the results
+    result = map(lambda x: (x[0], json.loads(x[1].data)), requests)
+    # remove any empty results and return
+    return filter(lambda x: x[1] is not None, result)
+
+def fetchCallSigns(input):
+    “““Fetch call signs”””
+    return input.mapPartitions(lambda callSigns : processCallSigns(callSigns))
+
+contactsContactList = fetchCallSigns(validSigns)
+```
+
+### Average without mapPartitions() in Python
+```
+def combineCtrs(c1, c2):
+    return (c1[0] + c2[0], c1[1] + c2[1])
+
+def basicAvg(nums):
+    “““Compute the average”””
+    nums.map(lambda num: (num, 1)).reduce(combineCtrs)
+```
+
+
+### Average with mapPartitions() in Python
+```
+def partitionCtr(nums):
+    “““Compute sumCounter for partition”””
+    sumCount = [0, 0]
+    for num in nums:
+        sumCount[0] += num
+        sumCount[1] += 1
+    return [sumCount]
+
+def fastAvg(nums):
+    “““Compute the avg”””
+    sumCount = nums.mapPartitions(partitionCtr).reduce(combineCtrs)
+    return sumCount[0] / float(sumCount[1])
+```
+
+
+
+
+## Piping to External Programs
+### R distance program
+```
+#!/usr/bin/env Rscript
+library(“Imap”)
+f <- file(“stdin”)
+open(f)
+while(length(line <- readLines(f,n=1)) > 0) {
+    # process line
+    contents <- Map(as.numeric, strsplit(line, “,”))
+    mydist <- gdist(contents[[1]][1], contents[[1]][2],
+    contents[[1]][3], contents[[1]][4],
+    units=“m”, a=6378137.0, b=6356752.3142, verbose = FALSE)
+    write(mydist, stdout())
+}
+```
+If that is written to an executable file named ./src/R/finddistance.R, then it looks like this
+in use:
+```
+$ ./src/R/finddistance.R
+37.75889318222431,-122.42683635321838,37.7614213,-122.4240097
+349.2602
+coffee
+NA
+ctrl-d
+```
+
+## Numeric RDD Operations
+??
+
+### Removing outliers in Python
+```
+# Convert our RDD of strings to numeric data so we can compute stats and
+# remove the outliers.
+distanceNumerics = distances.map(lambda string: float(string))
+stats = distanceNumerics.stats()
+stddev = std.stdev()
+mean = stats.mean()
+reasonableDistances = distanceNumerics.filter(
+lambda x: math.fabs(x - mean) < 3 * stddev)
+print reasonableDistances.collect()
+```
+
+
+
+
 # Chapter 7. Running on a Cluster (157)
 
 Spark can run on a wide variety
